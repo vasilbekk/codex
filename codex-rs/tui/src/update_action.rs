@@ -21,6 +21,7 @@ pub enum UpdateAction {
     /// Update via `brew upgrade codex`.
     BrewUpgrade,
     /// Update via `curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh`.
+    /// The command is wrapped to propagate HTTP request failures.
     StandaloneUnix,
     /// Update via `$env:CODEX_NON_INTERACTIVE=1; irm https://chatgpt.com/codex/install.ps1 | iex`.
     StandaloneWindows,
@@ -56,7 +57,7 @@ impl UpdateAction {
                 "sh",
                 &[
                     "-c",
-                    "curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh",
+                    "tmp=$(mktemp) || exit; trap 'rm -f \"$tmp\"' EXIT HUP INT TERM; curl -fsSL https://chatgpt.com/codex/install.sh -o \"$tmp\" || exit; CODEX_NON_INTERACTIVE=1 sh \"$tmp\"",
                 ],
             ),
             UpdateAction::StandaloneWindows => (
@@ -163,7 +164,7 @@ mod tests {
                 "sh",
                 &[
                     "-c",
-                    "curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh"
+                    "tmp=$(mktemp) || exit; trap 'rm -f \"$tmp\"' EXIT HUP INT TERM; curl -fsSL https://chatgpt.com/codex/install.sh -o \"$tmp\" || exit; CODEX_NON_INTERACTIVE=1 sh \"$tmp\""
                 ][..],
             )
         );
@@ -179,6 +180,30 @@ mod tests {
                 ][..],
             )
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn standalone_unix_update_propagates_download_failure() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = tempfile::tempdir().expect("create temporary directory");
+        let curl_path = temp_dir.path().join("curl");
+        std::fs::write(&curl_path, "#!/bin/sh\nexit 22\n").expect("write fake curl");
+        std::fs::set_permissions(&curl_path, std::fs::Permissions::from_mode(0o755))
+            .expect("make fake curl executable");
+
+        let (command, args) = UpdateAction::StandaloneUnix.command_args();
+        let status = std::process::Command::new(command)
+            .args(args)
+            .env(
+                "PATH",
+                format!("{}:/usr/bin:/bin", temp_dir.path().display()),
+            )
+            .status()
+            .expect("run standalone updater command");
+
+        assert_eq!(status.code(), Some(22));
     }
 }
 
